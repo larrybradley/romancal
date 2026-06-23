@@ -687,6 +687,7 @@ class _PSFCatalog:
         """
         # Define minimum separation before sources are fit simultaneously
         grouper = SourceGrouper(min_separation=5)  # pixels
+        grouper = None
         psfphot = PSFPhotometry(
             self.psf_model, fit_shape, grouper=grouper, aperture_radius=fit_shape[0]
         )
@@ -696,6 +697,18 @@ class _PSFCatalog:
         init_params["x_init"] = x_init
         init_params["y_init"] = y_init
 
+        log.info(f"Fit shape: {fit_shape}")
+        log.info(f"Aperture radius: {fit_shape[0]}")
+        log.info(f"grouper: {grouper}")
+        log.info(f"oversample: {self.psf_model.oversampling[0]}")
+        log.info(f"psf meta: {self.psf_model.meta}")
+        from astropy.io import fits
+
+        fits.writeto("psf_model.fits", self.psf_model.data, overwrite=True)
+        init_params.write("psf-init_params.ecsv", overwrite=True)
+        fits.writeto("psf_data.fits", self.model.data.value, overwrite=True)
+        fits.writeto("psf_err.fits", self.model.err.value, overwrite=True)
+        fits.writeto("psf_mask.fits", self.mask.astype(np.uint8), overwrite=True)
         log.info(f"Fitting {len(init_params)} sources with PSF photometry.")
         with warnings.catch_warnings():
             # Ignore warnings about fits failing to converge
