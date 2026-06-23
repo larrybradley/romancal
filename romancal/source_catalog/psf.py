@@ -696,6 +696,7 @@ class _PSFCatalog:
         init_params["x_init"] = x_init
         init_params["y_init"] = y_init
 
+        log.info(f"Fitting {len(init_params)} sources with PSF photometry.")
         with warnings.catch_warnings():
             # Ignore warnings about fits failing to converge
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -707,6 +708,7 @@ class _PSFCatalog:
                 mask=self.mask,
                 init_params=init_params,
             )
+        log.info(f"Fitted {len(results)} sources with PSF photometry.")
 
         # Set these columns as attributes of this instance
         for old_name, new_name in self._name_map.items():

@@ -3,6 +3,7 @@ Module to calculate the segmentation-based properties.
 """
 
 import inspect
+import logging
 import warnings
 from typing import ClassVar
 
@@ -10,6 +11,8 @@ import astropy.units as u
 import numpy as np
 from astropy.utils import lazyproperty
 from photutils.segmentation import SourceCatalog
+
+log = logging.getLogger(__name__)
 
 
 class SegmentCatalog:
@@ -309,6 +312,7 @@ class SegmentCatalog:
         # Set the source properties as attributes of this instance
         for name in photutils_names:
             new_name = name_map.get(name, name)
+            log.info(f"Calculating {new_name} from photutils SourceCatalog")
             value = getattr(segm_cat, name)
 
             # Handle any unit conversions needed for specific columns
@@ -373,6 +377,7 @@ class SegmentCatalog:
                 setattr(self, new_name, value)
                 if self._is_requested(new_name):
                     self.properties.append(new_name)
+                log.info(f"Done calculating {new_name} from photutils SourceCatalog")
 
     def add_placeholders(self):
         """
@@ -438,5 +443,7 @@ class SegmentCatalog:
         The circular radius (in arcsec) at which the total Kron flux
         fraction is 50%.
         """
+        log.info("Calculating fluxfrac_radius_50 from photutils SourceCatalog")
         value = self.source_cat.flux_radius(0.5)
+        log.info("Done calculating fluxfrac_radius_50 from photutils SourceCatalog")
         return (value.value * self.pixel_scale).astype(np.float32)

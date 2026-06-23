@@ -162,6 +162,8 @@ class ApertureCatalog:
         annulus. The background error is the standard error of the
         median, sqrt(pi / (2 * N)) * std.
         """
+        log.info("Calculating local background in annulus")
+
         bkg_aper = CircularAnnulus(
             self.xypos_finite,
             self.aperture_radii["annulus_pix"][0],
@@ -199,6 +201,8 @@ class ApertureCatalog:
 
             # Standard error of the median
             bkg_median_err = np.sqrt(np.pi / (2.0 * nvalues)) * bkg_std
+
+        log.info("Finished calculating local background in annulus")
 
         return bkg_median.astype(np.float32), bkg_median_err.astype(np.float32)
 
@@ -303,6 +307,10 @@ class ApertureCatalog:
         )
 
         for i, aperture in enumerate(apertures):
+            log.info(
+                f"Calculating aperture photometry for radius "
+                f"{self.aperture_radii['circle'][i]:.3f} arcsec"
+            )
             tmp_flux_col = f"aperture_sum_{i}"
             tmp_flux_err_col = f"aperture_sum_err_{i}"
 
@@ -316,5 +324,9 @@ class ApertureCatalog:
             flux_err_col = f"{flux_col}_err"
             setattr(self, flux_col, aper_phot[tmp_flux_col].astype(np.float32))
             setattr(self, flux_err_col, aper_phot[tmp_flux_err_col].astype(np.float32))
+            log.info(
+                f"Finished calculating aperture photometry for radius "
+                f"{self.aperture_radii['circle'][i]:.3f} arcsec"
+            )
 
         self.calc_ee_fractions()
