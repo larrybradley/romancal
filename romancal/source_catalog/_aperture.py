@@ -3,14 +3,17 @@ Module to calculate aperture photometry.
 """
 
 import logging
-import warnings
 
 import numpy as np
 from astropy import units as u
 from astropy.stats import SigmaClip
 from astropy.utils.decorators import lazyproperty
-from astropy.utils.exceptions import AstropyUserWarning
-from photutils.aperture import CircularAnnulus, CircularAperture, aperture_photometry
+from photutils.aperture import (
+    ApertureStats,
+    CircularAnnulus,
+    CircularAperture,
+    aperture_photometry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -169,42 +172,18 @@ class ApertureCatalog:
             self.aperture_radii["annulus_pix"][0],
             self.aperture_radii["annulus_pix"][1],
         )
-        bkg_aper_masks = bkg_aper.to_mask(method="center")
         sigclip = SigmaClip(sigma=3.0)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            warnings.simplefilter("ignore", category=AstropyUserWarning)
-
-            unit = self.model.data.unit
-            nvalues = []
-            bkg_median = []
-            bkg_std = []
-            for mask in bkg_aper_masks:
-                bkg_data = mask.get_values(self.model.data)
-                values = sigclip(bkg_data, masked=False)
-                nvalues.append(values.size)
-                med = np.median(values)
-                std = np.std(values)
-                if values.size == 0:
-                    # Handle case where source is completely masked due to
-                    # forced photometry
-                    med <<= unit
-                    std <<= unit
-                bkg_median.append(med)
-                bkg_std.append(std)
-
-            nvalues = np.array(nvalues)
-            pixel_area = self.pixel_scale**2
-            bkg_median = u.Quantity(bkg_median) / pixel_area
-            bkg_std = u.Quantity(bkg_std) / pixel_area
-
-            # Standard error of the median
-            bkg_median_err = np.sqrt(np.pi / (2.0 * nvalues)) * bkg_std
+        apstats = ApertureStats(
+            self.model.data, bkg_aper, sigma_clip=sigclip, error=self.model.err
+        )
+        log.info("Calculating local background in annulus")
+        bkg_median = apstats.median.astype(np.float32)
+        log.info("Calculating local background error in annulus")
+        bkg_median_err = apstats.median_err.astype(np.float32)
 
         log.info("Finished calculating local background in annulus")
 
-        return bkg_median.astype(np.float32), bkg_median_err.astype(np.float32)
+        return bkg_median, bkg_median_err
 
     @lazyproperty
     def aper_bkg_flux(self):
