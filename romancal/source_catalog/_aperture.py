@@ -176,13 +176,14 @@ class ApertureCatalog:
         apstats = ApertureStats(
             self.model.data, bkg_aper, sigma_clip=sigclip, error=self.model.err
         )
+        pixel_area = self.pixel_scale**2
         log.info("Calculating local background in annulus")
-        bkg_median = apstats.median.astype(np.float32)
+        bkg_median = (apstats.median / pixel_area).astype(np.float32)
+
         log.info("Calculating local background error in annulus")
-        bkg_median_err = apstats.median_err.astype(np.float32)
+        bkg_median_err = (apstats.median_err / pixel_area).astype(np.float32)
 
         log.info("Finished calculating local background in annulus")
-
         return bkg_median, bkg_median_err
 
     @lazyproperty
