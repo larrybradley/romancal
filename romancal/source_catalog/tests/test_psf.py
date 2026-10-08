@@ -18,6 +18,8 @@ from numpy.testing import assert_allclose
 from photutils.datasets import make_model_image
 from photutils.psf import GriddedPSFModel, ImagePSF
 from roman_datamodels.datamodels import ImageModel, MosaicModel
+from scipy.signal import fftconvolve
+from scipy.special import erf
 
 from romancal.source_catalog.psf import (
     _azimuthally_average_via_fft,
@@ -348,6 +350,79 @@ def test_create_convolution_kernel(setup_inputs):
     # in my tests diff_conv is 1e-5, diff_noconv is 0.008, and the ratio
     # is 1.5e-3
     assert diff_conv < diff_noconv / 100
+
+
+def _pixel_integrated_gaussian(offsets_y, offsets_x, sigma):
+    """
+    Evaluate a unit-flux circular Gaussian, integrated over pixels of
+    unit size, at the given pixel-center offsets from its center.
+    """
+    scale = np.sqrt(2) * sigma
+    profiles = [
+        0.5 * (erf((offsets + 0.5) / scale) - erf((offsets - 0.5) / scale))
+        for offsets in (offsets_y, offsets_x)
+    ]
+    return np.outer(*profiles)
+
+
+@pytest.mark.parametrize(
+    "sigma_input, sigma_target, tolerance",
+    [
+        # well sampled at the original sampling
+        (1.5, 2.5, 1e-3),
+        (1.0, 1.2, 1e-3),
+        # undersampled at the original sampling
+        (0.5, 0.8, 0.035),
+    ],
+)
+def test_create_convolution_kernel_downsample(sigma_input, sigma_target, tolerance):
+    """
+    Test that a kernel made from oversampled PSFs with ``downsample``
+    matches images at the original sampling for any subpixel position
+    of the source.
+    """
+    oversample = 4
+    offsets = (np.arange(161) - 80) / oversample
+    input_psf = _pixel_integrated_gaussian(offsets, offsets, sigma_input)
+    target_psf = _pixel_integrated_gaussian(offsets, offsets, sigma_target)
+    kernel = _create_convolution_kernel(input_psf, target_psf, downsample=oversample)
+
+    assert kernel.shape == (81, 81)
+    np.testing.assert_allclose(kernel.sum(), 1.0)
+
+    pixels = np.arange(41) - 20.0
+    for dx, dy in [(0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.31, -0.17), (-0.4, 0.22)]:
+        image = _pixel_integrated_gaussian(pixels - dy, pixels - dx, sigma_input)
+        expected = _pixel_integrated_gaussian(pixels - dy, pixels - dx, sigma_target)
+        matched = fftconvolve(image, kernel, mode="same")
+        np.testing.assert_allclose(matched, expected, atol=tolerance * expected.max())
+
+
+def test_create_convolution_kernel_downsample_shift():
+    """
+    Test the orientation of the kernel made with ``downsample`` using
+    a target PSF that is the input PSF shifted by whole pixels at the
+    original sampling.
+    """
+    oversample = 4
+    offsets = (np.arange(121) - 60) / oversample
+    input_psf = _pixel_integrated_gaussian(offsets, offsets, 1.5)
+    target_psf = _pixel_integrated_gaussian(offsets + 2, offsets - 1, 1.5)
+    kernel = _create_convolution_kernel(
+        input_psf, target_psf, downsample=oversample, size=11
+    )
+    assert kernel.shape == (11, 11)
+
+    # the target is the input shifted by -2 pixels in y and +1 in x
+    idx = np.unravel_index(np.argmax(kernel), kernel.shape)
+    assert idx == (5 - 2, 5 + 1)
+
+    pixels = np.arange(31) - 15.0
+    image = _pixel_integrated_gaussian(pixels, pixels, 1.5)
+    expected = _pixel_integrated_gaussian(pixels + 2, pixels - 1, 1.5)
+    matched = fftconvolve(image, kernel, mode="same")
+    # the kernel is a regularized delta function, so the match is coarse
+    np.testing.assert_allclose(matched, expected, atol=0.05 * expected.max())
 
 
 def test_central_stamp():

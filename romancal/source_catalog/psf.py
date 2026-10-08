@@ -21,6 +21,7 @@ from photutils.psf import (
     SourceGrouper,
 )
 from scipy.ndimage import map_coordinates
+from scipy.signal import fftconvolve
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
@@ -207,7 +208,11 @@ def _create_convolution_kernel(
 
     downsample : int
         amount to downsample the final kernels by; useful if the models
-        are oversampled but an image with the original sampling is desired
+        are oversampled but an image with the original sampling is desired.
+        The kernel is then the one at the original sampling that minimizes
+        the squared difference between the convolved input PSF and the
+        target PSF, averaged over the subpixel positions of the source
+        (see Notes).
 
     size : int
         the desired size of the final stamp
@@ -215,31 +220,70 @@ def _create_convolution_kernel(
     Returns
     -------
     kernel : np.ndarray
-        Convolution kernel taking input_psf to target_psf
+        Convolution kernel taking input_psf to target_psf. If
+        ``downsample`` is used and ``size`` is not, the kernel covers
+        all of the lags between the two PSF stamps that are whole
+        pixels at the original sampling, which is about twice the
+        extent of the stamps. It is not cropped to the extent of the
+        stamps, because the kernel has structure out to that distance
+        that sums to several percent, so cropping and renormalizing it
+        would rescale its core.
 
+    Notes
+    -----
+    An image at the original sampling contains the oversampled PSF only
+    at every ``downsample``-th point, at a subpixel phase that depends
+    on the position of the source. A kernel ``k`` at the original
+    sampling that is applied to such an image gives ``sum_m k[m]
+    input_psf(x - m)`` for a source at any phase ``x``. The kernel that
+    minimizes the squared difference between this and ``target_psf(x)``,
+    summed over all ``x`` of the oversampled grid, satisfies ``sum_m
+    k[m] C_ii[l - m] = C_it[l]``, where ``C_ii`` is the autocorrelation
+    of the input PSF and ``C_it`` is the cross-correlation of the input
+    and target PSFs, both at lags ``l`` of whole original pixels. This
+    is solved in Fourier space with the same regularization as for the
+    oversampled kernel.
+
+    If the PSFs are well sampled at the original sampling, this is the
+    oversampled kernel sampled at the original pixels. If they are
+    undersampled, sampling the oversampled kernel aliases its power at
+    high frequencies, and integrating it over the pixels first makes
+    the convolved image too broad.
     """
-    input_psf = fft.ifftshift(input_psf.copy())
-    target_psf = fft.ifftshift(target_psf.copy())
+    input_psf = input_psf / input_psf.sum()
+    target_psf = target_psf / target_psf.sum()
 
-    input_psf /= input_psf.sum()
-    target_psf /= target_psf.sum()
-
-    input_fft = fft.fft2(input_psf)
-    target_fft = fft.fft2(target_psf)
-
-    input_power = np.abs(input_fft) ** 2
-    max_power = np.max(input_power)
-    conv_kernel_fft = (
-        target_fft
-        * np.conj(input_fft)
-        / (input_power + min_fft_power_ratio * max_power)
-    )
-
-    kernel = np.real(fft.fftshift(fft.ifft2(conv_kernel_fft)))
-    kernel = kernel / kernel.sum()
     if downsample is not None and downsample > 1:
-        kernel = convolve(kernel, Box2DKernel(width=downsample), boundary="extend")
-        kernel = _downsample_by_interpolation(kernel, downsample)
+        # correlations at all lags of the oversampled grid, with zero
+        # lag at the central point
+        flipped = input_psf[::-1, ::-1]
+        cross_corr = fftconvolve(target_psf, flipped, mode="full")
+        auto_corr = fftconvolve(input_psf, flipped, mode="full")
+
+        # keep the lags that are whole pixels at the original sampling
+        lags = tuple(
+            slice(((npts - 1) // 2) % downsample, None, downsample)
+            for npts in cross_corr.shape
+        )
+        cross_fft = fft.fft2(fft.ifftshift(cross_corr[lags]))
+        input_power = np.real(fft.fft2(fft.ifftshift(auto_corr[lags])))
+        max_power = np.max(input_power)
+        conv_kernel_fft = cross_fft / (input_power + min_fft_power_ratio * max_power)
+        kernel = np.real(fft.fftshift(fft.ifft2(conv_kernel_fft)))
+    else:
+        input_fft = fft.fft2(fft.ifftshift(input_psf))
+        target_fft = fft.fft2(fft.ifftshift(target_psf))
+
+        input_power = np.abs(input_fft) ** 2
+        max_power = np.max(input_power)
+        conv_kernel_fft = (
+            target_fft
+            * np.conj(input_fft)
+            / (input_power + min_fft_power_ratio * max_power)
+        )
+        kernel = np.real(fft.fftshift(fft.ifft2(conv_kernel_fft)))
+
+    kernel = kernel / kernel.sum()
     if size is not None:
         return _central_stamp(kernel, size).copy()
     return kernel
