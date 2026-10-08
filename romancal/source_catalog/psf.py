@@ -19,6 +19,7 @@ from photutils.psf import (
     ImagePSF,
     PSFPhotometry,
     SourceGrouper,
+    make_epsf_from_psf,
 )
 from scipy.ndimage import map_coordinates
 
@@ -290,12 +291,14 @@ def get_gridded_psf_model(psf_ref_model, focus=0, spectral_type=1):
 
     if is_old_format:
         log.info("Integrating over the native pixel scale.")
-        # integrate over the native pixel scale
-        pixel_response_kernel = Box2DKernel(width=oversample)
-        for i in range(psf_images.shape[0]):
-            psf = psf_images[i, :, :]
-            im = convolve(psf, pixel_response_kernel) * oversample**2
-            psf_images[i, :, :] = im
+        # The stamps are samples of the PSF at the points of the
+        # oversampled grid. Integrate a spline through the samples over
+        # the area of a native pixel centered at each grid point. A
+        # discrete box kernel is a low-order approximation of this
+        # integral that makes the undersampled Roman PSFs too broad.
+        psf_images = make_epsf_from_psf(
+            psf_images * oversample**2, oversampling=oversample
+        ).astype(psf_images.dtype)
 
     meta["grid_xypos"] = position_list
     meta["oversampling"] = oversample

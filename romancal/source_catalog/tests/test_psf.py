@@ -3,6 +3,7 @@ Unit tests for the Roman source detection step code
 """
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 import crds
 import numpy as np
@@ -18,6 +19,7 @@ from numpy.testing import assert_allclose
 from photutils.datasets import make_model_image
 from photutils.psf import GriddedPSFModel, ImagePSF
 from roman_datamodels.datamodels import ImageModel, MosaicModel
+from scipy.special import erf
 
 from romancal.source_catalog.psf import (
     _azimuthally_average_via_fft,
@@ -196,6 +198,78 @@ def test_render_stamp(setup_inputs):
     stamp = render_stamp(0, 0, psf_model, 1)
     assert np.sum(stamp) < 0.6
     assert stamp.shape[0] == stamp.shape[1] == 1
+
+
+def _make_gaussian_psf_ref_model(sigma, oversample, *, integrated):
+    """
+    Make a minimal stand-in for an ePSF reference model whose stamps
+    are a circular Gaussian with a standard deviation of ``sigma``
+    native pixels.
+
+    If ``integrated`` is `False`, the stamps are samples of the
+    Gaussian at the points of the oversampled grid and sum to 1 (the
+    old reference file format). If `True`, they are integrated over
+    the native pixels and sum to ``oversample**2``.
+    """
+    npts = 25 * oversample + 1
+    offsets = (np.arange(npts) - npts // 2) / oversample
+    scale = np.sqrt(2) * sigma
+    epsf_profile = 0.5 * (erf((offsets + 0.5) / scale) - erf((offsets - 0.5) / scale))
+    epsf = np.outer(epsf_profile, epsf_profile)
+    if integrated:
+        stamp = epsf
+    else:
+        profile = np.exp(-(offsets**2) / (2 * sigma**2))
+        profile /= profile.sum()
+        stamp = np.outer(profile, profile)
+
+    # axes are (focus, spectral type, position, y, x)
+    psf = np.broadcast_to(stamp, (1, 2, 4, npts, npts)).astype(np.float32)
+    meta = SimpleNamespace(
+        pixel_x=[0.0, 4087.0, 0.0, 4087.0],
+        pixel_y=[0.0, 0.0, 4087.0, 4087.0],
+        oversample=oversample,
+    )
+    return SimpleNamespace(psf=psf, meta=meta), epsf
+
+
+@pytest.mark.parametrize("sigma", [0.5, 0.7, 1.0])
+def test_get_gridded_psf_model_pixel_integration(sigma):
+    """
+    Test that PSF stamps that are sampled at the points of the
+    oversampled grid are accurately integrated over the native pixels.
+    """
+    oversample = 4
+    ref_model, expected = _make_gaussian_psf_ref_model(
+        sigma, oversample, integrated=False
+    )
+    model = get_gridded_psf_model(ref_model)
+
+    assert model.data.shape == ref_model.psf.shape[2:]
+    assert model.data.dtype == ref_model.psf.dtype
+    for epsf in model.data:
+        # a discrete box kernel gives a peak that is 3.0%, 1.8%, and
+        # 1.0% too low for these three widths
+        np.testing.assert_allclose(epsf.max(), expected.max(), rtol=2e-3)
+        np.testing.assert_allclose(epsf, expected, atol=2e-3 * expected.max())
+        np.testing.assert_allclose(epsf.sum(), oversample**2, rtol=1e-4)
+
+    # the model conserves flux at any subpixel position
+    yy, xx = np.mgrid[-10:11, -10:11]
+    for dx, dy in [(0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.31, -0.17)]:
+        image = model.evaluate(xx + 2000.0, yy + 2000.0, 1.0, 2000 + dx, 2000 + dy)
+        np.testing.assert_allclose(image.sum(), 1.0, rtol=1e-3)
+
+
+def test_get_gridded_psf_model_integrated_input():
+    """
+    Test that PSF stamps that are already integrated over the native
+    pixels are used unchanged.
+    """
+    ref_model, expected = _make_gaussian_psf_ref_model(0.7, 4, integrated=True)
+    model = get_gridded_psf_model(ref_model)
+    for epsf in model.data:
+        np.testing.assert_allclose(epsf, expected, rtol=1e-6)
 
 
 def test_get_jitter_params():
