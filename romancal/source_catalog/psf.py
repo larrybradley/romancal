@@ -20,6 +20,7 @@ from photutils.psf import (
     PSFPhotometry,
     SourceGrouper,
 )
+from scipy.interpolate import make_interp_spline
 from scipy.ndimage import map_coordinates
 
 log = logging.getLogger(__name__)
@@ -118,6 +119,48 @@ def _azimuthally_average_via_fft(data, pixel_scale_ratio=1.0):
     f_interp = f_interp.reshape(npts, npts)
     psf_new = np.real(fft.fftshift(fft.ifft2(fft.ifftshift(f_interp))))
     return psf_new
+
+
+def _integrate_over_box(image, width):
+    """Average an image over a square box centered at each of its points.
+
+    The image is taken to be samples of a smooth function at its grid
+    points. A cubic spline through the samples is integrated exactly
+    over a box of the given width centered at each grid point, and the
+    integral is divided by the area of the box. The sum of the image is
+    therefore preserved, apart from edge effects.
+
+    A discrete box kernel is a low-order approximation of this integral,
+    and `astropy.convolution.Box2DKernel` also rounds a width that is not
+    an integer. Both make a difference of several percent in the peak of
+    an undersampled PSF.
+
+    The image is taken to be zero outside of its grid.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        The 2D image to be averaged
+    width : float
+        The width of the box in grid points.  It does not need to be an
+        integer.
+
+    Returns
+    -------
+    image_averaged : np.ndarray
+        The averaged image, with the same shape as image
+    """
+    result = np.asarray(image, dtype=float)
+    for axis in (0, 1):
+        npts = result.shape[axis]
+        points = np.arange(npts, dtype=float)
+        antiderivative = make_interp_spline(
+            points, result, k=3, axis=axis
+        ).antiderivative()
+        lower = np.clip(points - width / 2, 0, npts - 1)
+        upper = np.clip(points + width / 2, 0, npts - 1)
+        result = (antiderivative(upper) - antiderivative(lower)) / width
+    return result
 
 
 def _downsample_by_interpolation(image, downsample):
@@ -573,11 +616,9 @@ def create_l3_psf_model(
     # at the native PSF scale, oversampled by a factor of oversample.
 
     # Smooth to account for the pixfrac used to create the L3 image.
-    pixfrac_kernel = Box2DKernel(width=pixfrac * oversample)
-    psf = convolve(psf, kernel=pixfrac_kernel)
+    psf = _integrate_over_box(psf, pixfrac * oversample)
     # Smooth to the image scale
-    outscale_kernel = Box2DKernel(width=oversample * pixel_scale / detector_pixel_scale)
-    psf = convolve(psf, kernel=outscale_kernel)
+    psf = _integrate_over_box(psf, oversample * pixel_scale / detector_pixel_scale)
     # Azimuthally smooth the psf
     psf = _azimuthally_average_via_fft(
         psf, pixel_scale_ratio=pixel_scale / detector_pixel_scale

@@ -18,6 +18,7 @@ from numpy.testing import assert_allclose
 from photutils.datasets import make_model_image
 from photutils.psf import GriddedPSFModel, ImagePSF
 from roman_datamodels.datamodels import ImageModel, MosaicModel
+from scipy.special import erf
 
 from romancal.source_catalog.psf import (
     _azimuthally_average_via_fft,
@@ -26,8 +27,10 @@ from romancal.source_catalog.psf import (
     _downsample_by_interpolation,
     _evaluate_gaussian_fft,
     _get_jitter_params,
+    _integrate_over_box,
     _PSFCatalog,
     add_jitter,
+    create_l3_psf_model,
     get_gridded_psf_model,
     render_stamp,
 )
@@ -348,6 +351,86 @@ def test_create_convolution_kernel(setup_inputs):
     # in my tests diff_conv is 1e-5, diff_noconv is 0.008, and the ratio
     # is 1.5e-3
     assert diff_conv < diff_noconv / 100
+
+
+@pytest.mark.parametrize("width", [1.6, 2.0, 2.909, 3.2, 4.0])
+@pytest.mark.parametrize("sigma", [0.6, 1.0])
+def test_integrate_over_box(width, sigma):
+    """
+    Test the box average of a sampled Gaussian against the analytic
+    result, including widths that are not an integer number of grid
+    points.
+    """
+    oversample = 4
+    offsets = (np.arange(81) - 40) / oversample
+    profile = np.exp(-(offsets**2) / (2 * sigma**2))
+    image = np.outer(profile, profile)
+
+    # the analytic average of the Gaussian over the box
+    half = width / oversample / 2
+    scale = np.sqrt(2) * sigma
+    profile = (
+        np.sqrt(np.pi / 2)
+        * sigma
+        * (erf((offsets + half) / scale) - erf((offsets - half) / scale))
+        / (2 * half)
+    )
+    expected = np.outer(profile, profile)
+
+    result = _integrate_over_box(image, width)
+    assert result.shape == image.shape
+    np.testing.assert_allclose(result, expected, atol=1e-3 * expected.max())
+    np.testing.assert_allclose(result.sum(), image.sum(), rtol=1e-6)
+
+
+def test_integrate_over_box_edges():
+    """
+    Test that the image is taken to be zero outside of its grid.
+    """
+    result = _integrate_over_box(np.ones((21, 21)), 4.0)
+    np.testing.assert_allclose(result[5:-5, 5:-5], 1.0)
+    np.testing.assert_allclose(result[0, 10], 0.5)
+    np.testing.assert_allclose(result[10, 0], 0.5)
+    np.testing.assert_allclose(result[0, 0], 0.25)
+    np.testing.assert_allclose(result[1, 10], 0.75)
+
+
+@pytest.mark.parametrize(
+    "pixfrac, pixel_scale",
+    [(1.0, 0.11), (1.0, 0.08), (1.0, 0.055), (0.8, 0.11), (0.5, 0.055)],
+)
+def test_create_l3_psf_model_oversample(setup_inputs, pixfrac, pixel_scale):
+    """
+    Test that the L3 PSF model does not depend on the oversampling of
+    the grid on which the pixfrac and output-pixel boxes are applied.
+
+    With discrete box kernels the peak of the model on the default
+    grid differed by 3 to 12% from the one on a 4 times finer grid.
+    """
+    psf_ref_model = setup_inputs["psf_ref_model_f087"]
+    model = create_l3_psf_model(psf_ref_model, pixfrac=pixfrac, pixel_scale=pixel_scale)
+    oversample = int(model.oversampling[0])
+    fine_model = create_l3_psf_model(
+        psf_ref_model,
+        pixfrac=pixfrac,
+        pixel_scale=pixel_scale,
+        oversample=4 * oversample,
+    )
+
+    # the points of the fine grid that are also on the default grid
+    half = 30
+    center = model.data.shape[0] // 2
+    data = model.data[
+        center - half : center + half + 1, center - half : center + half + 1
+    ]
+    center = fine_model.data.shape[0] // 2
+    idx = center + 4 * np.arange(-half, half + 1)
+    fine_data = fine_model.data[np.ix_(idx, idx)]
+
+    data = data / data.sum()
+    fine_data = fine_data / fine_data.sum()
+    np.testing.assert_allclose(data.max(), fine_data.max(), rtol=2e-3)
+    np.testing.assert_allclose(data, fine_data, atol=2e-3 * fine_data.max())
 
 
 def test_central_stamp():
